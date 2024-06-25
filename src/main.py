@@ -40,7 +40,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='Disables CUDA training.')
 parser.add_argument('--seed', type=int, default=1, help='Random seed.')
-parser.add_argument('--epochs', type=int, default=1000, # 1000
+parser.add_argument('--epochs', type=int, default=200, # 1000
                     help='Number of epochs to train.')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='Initial learning rate.')
@@ -75,7 +75,7 @@ if args.cuda:
 torch.backends.cudnn.allow_tf32 = False
 
 # set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 def add_list_in_dict(key, dict, elem):
     if key not in dict:
@@ -110,7 +110,7 @@ def stats_cov(data1, data2):
         'R-square': R2
     }
     return result
-
+# 函数用于分析敏感属性和预测结果之间的依赖关系. 这里选取每个节点距离为1的邻居
 def analyze_dependency(sens, adj, ypred_tst, idx_select, type='mean'):
     if type == 'mean':
         # row-normalize
@@ -137,13 +137,13 @@ def get_all_node_emb(model, mask, subgraph, num_node):
     # Obtain central node embs from subgraphs
     node_list = np.arange(0, num_node, 1)[mask]
     list_size = node_list.size
-    z = torch.Tensor(list_size, args.hidden_size).cuda()
+    z = torch.Tensor(list_size, args.hidden_size).to(device)
     group_nb = math.ceil(list_size / args.batch_size)  # num of batches
     for i in range(group_nb):
         maxx = min(list_size, (i + 1) * args.batch_size)
         minn = i * args.batch_size
         batch, index = subgraph.search(node_list[minn:maxx])
-        node = model(batch.x.cuda(), batch.edge_index.cuda(), batch.batch.cuda(), index.cuda())
+        node = model(batch.x.to(device), batch.edge_index.to(device), batch.batch.to(device), index.to(device))
         z[minn:maxx] = node
     return z
 
@@ -151,15 +151,16 @@ def get_all_node_pred(model, mask, subgraph, num_node):
     # Obtain central node prediction from subgraphs
     node_list = np.arange(0, num_node, 1)[mask]
     list_size = node_list.size
-    # z = torch.Tensor(list_size, args.hidden_size).cuda()
-    y_pred = torch.Tensor(list_size).cuda()
+    # z = torch.Tensor(list_size, args.hidden_size).to(device)
+    y_pred = torch.Tensor(list_size).to(device)
     group_nb = math.ceil(list_size / args.batch_size)  # num of batches
     for i in range(group_nb):
         maxx = min(list_size, (i + 1) * args.batch_size)
         minn = i * args.batch_size
         batch, index = subgraph.search(node_list[minn:maxx])
-        node = model(batch.x.cuda(), batch.edge_index.cuda(), batch.batch.cuda(), index.cuda())
+        node = model(batch.x.to(device), batch.edge_index.to(device), batch.batch.to(device), index.to(device))
         y_pred_cur = model.predict(node)
+        #TODO 为了二分类？或许可以从这里入手实现非binary敏感属性数据的处理
         y_pred[minn:maxx] = (y_pred_cur.squeeze() > 0).float()
     return y_pred
 
@@ -189,6 +190,7 @@ def evaluate(model, data, subgraph, cf_subgraph_list, labels, sens, idx_select, 
         for si in range(len(cf_subgraph_list)):
             cf_subgraph = cf_subgraph_list[si]
             emb_cf = get_all_node_emb(model, idx_select_mask, cf_subgraph, n)
+            # TODO ? what type of predict result
             output_cf = model.predict(emb_cf)
             output_preds_cf = (output_cf.squeeze() > 0).type_as(labels)
 
@@ -250,7 +252,7 @@ def evaluate_cf(model, data, subgraph, cf_subgraph, labels, sens, idx_select, ty
     # Obtain COUNTERFACTUAL central node embs from subgraphs
     node_list = np.arange(0, num_node, 1)[mask]
     list_size = node_list.size
-    z = torch.Tensor(list_size, args.hidden_size).cuda()
+    z = torch.Tensor(list_size, args.hidden_size).to(device)
     group_nb = math.ceil(list_size / args.batch_size)  # num of batches
     for i in range(group_nb):
         maxx = min(list_size, (i + 1) * args.batch_size)
@@ -259,7 +261,7 @@ def evaluate_cf(model, data, subgraph, cf_subgraph, labels, sens, idx_select, ty
             batch, index = get_cf_self(node_list[minn:maxx]) # subgraph.search(node_list[minn:maxx])
         elif type == 'neighbor':
             batch, index = get_cf_neighbor(node_list[minn:maxx])
-        node = model(batch.x.cuda(), batch.edge_index.cuda(), batch.batch.cuda(), index.cuda())
+        node = model(batch.x.to(device), batch.edge_index.to(device), batch.batch.to(device), index.to(device))
         z[minn:maxx] = node
     return z
 
@@ -282,7 +284,7 @@ def train(epochs, model, optimizer_1, optimizer_2, data, subgraph, cf_subgraph_l
 
             # forward: factual subgraph
             batch, index = subgraph.search(sample_idx)
-            z = model(batch.x.cuda(), batch.edge_index.cuda(), batch.batch.cuda(), index.cuda()) # center node rep, subgraph rep
+            z = model(batch.x.to(device), batch.edge_index.to(device), batch.batch.to(device), index.to(device)) # center node rep, subgraph rep
 
             # projector
             p1 = model.projection(z)
@@ -294,7 +296,7 @@ def train(epochs, model, optimizer_1, optimizer_2, data, subgraph, cf_subgraph_l
             for si in range(len(cf_subgraph_list)):
                 cf_subgraph = cf_subgraph_list[si]
                 batch_cf, index_cf = cf_subgraph.search(sample_idx)
-                z_cf = model(batch_cf.x.cuda(), batch_cf.edge_index.cuda(), batch_cf.batch.cuda(), index_cf.cuda())  # center node rep, subgraph rep
+                z_cf = model(batch_cf.x.to(device), batch_cf.edge_index.to(device), batch_cf.batch.to(device), index_cf.to(device))  # center node rep, subgraph rep
 
                 # projector
                 p2 = model.projection(z_cf)
@@ -311,7 +313,7 @@ def train(epochs, model, optimizer_1, optimizer_2, data, subgraph, cf_subgraph_l
         optimizer_1.step()
 
         # classifier
-        z = model(batch.x.cuda(), batch.edge_index.cuda(), batch.batch.cuda(), index.cuda())  # center node rep, subgraph rep
+        z = model(batch.x.to(device), batch.edge_index.to(device), batch.batch.to(device), index.to(device))  # center node rep, subgraph rep
         c1 = model.classifier(z)
 
         # Binary Cross-Entropy
@@ -405,14 +407,27 @@ def test(model, adj, data, dataset, subgraph, cf_subgraph_pred_list, labels, sen
 
 
 # the model generates counterfactual data as augmentation(don't have to be true)
-def generate_cf_data(data, sens_idx, mode=1, sens_cf=None, adj_raw=None, model_path='', train='test'):
+# def generate_cf_data(data, sens_idx, mode=1, sens_cf=None, adj_raw=None, model_path='', train='test'):
+def generate_cf_data(data, sens_idx, mode=1, sens_cf=None, adj_raw=None, model_path='', train='train'):
     h_dim = 32
     input_dim = data.x.shape[1]
     adj = adj_raw.tocoo()
     indices_adj = torch.LongTensor([adj.row, adj.col])
     adj = torch.sparse_coo_tensor(indices_adj, adj.data, size=(adj.shape[0], adj.shape[1])).float()
 
-    model_DA = CFDA(h_dim, input_dim, adj.cuda()).to(device)
+    # 检查 adj 的数据格式并转换为密集矩阵
+    if isinstance(adj, torch.sparse.FloatTensor):
+        adj = adj.to_dense()
+
+    # 尝试将 adj 移动到 CUDA 设备
+    try:
+        adj = adj.to(device)
+    except Exception as e:
+        print("Error moving adj to CUDA:", e)
+        return None
+    #TODO break at
+    model_DA = CFDA(h_dim, input_dim, adj.to(device)).to(device)
+    print("model initial successfully!")
     if train == 'test':
         model_DA.load_state_dict(torch.load(model_path + f'weights_CFDA_{args.dataset}' + '.pt'))
         # test?
@@ -425,7 +440,7 @@ def generate_cf_data(data, sens_idx, mode=1, sens_cf=None, adj_raw=None, model_p
             s_num = 4
             S_agg_cat = torch.floor(S_agg / ((S_agg_max + 0.000001 - S_agg_min) / s_num)).long()  # n x 1
 
-            eval_result = model_DA.test(adj.cuda(), data.x.cuda(), sens_idx, S_agg_cat.cuda())
+            eval_result = model_DA.test(adj.to(device), data.x.to(device), sens_idx, S_agg_cat.to(device))
             print(
                 'loss_reconst_a: {:.4f}'.format(eval_result['loss_reconst_a'].item()),
                 'acc_a_pred: {:.4f}'.format(eval_result['acc_a_pred'].item()),
@@ -433,11 +448,11 @@ def generate_cf_data(data, sens_idx, mode=1, sens_cf=None, adj_raw=None, model_p
                 'acc_a_pred_1: {:.4f}'.format(eval_result['acc_a_pred_1'].item()),
             )
     else:
-        model_DA.train_model(data.x.cuda(), adj.cuda(), sens_idx, args.dataset, model_path=model_path, lr=0.0001, weight_decay=1e-5)
+        model_DA.train_model(data.x.to(device), adj.to(device), sens_idx, args.dataset, model_path=model_path, lr=0.0001, weight_decay=1e-5)
 
     # generate cf for whole graph to achieve better efficiency
-    Z_a, Z_x = model_DA.encode(data.x.cuda())
-    adj_update, x_update = model_DA.pred_graph(Z_a, Z_x, sens_cf.view(-1,1).cuda())
+    Z_a, Z_x = model_DA.encode(data.x.to(device))
+    adj_update, x_update = model_DA.pred_graph(Z_a, Z_x, sens_cf.view(-1,1).to(device))
 
     # hybrid
     w_hd_x = 0.99
@@ -497,6 +512,7 @@ if __name__ == '__main__':
     data_path_root = '../'
     model_path = 'models_save/'
     adj, features, labels, idx_train_list, idx_val_list, idx_test_list, sens, sens_idx, raw_data_info = dpp.load_data(data_path_root, args.dataset)
+    # sens_idx:0.
     if raw_data_info is None:
         raw_data_info = {'adj': adj}
     # dpp.pre_analysis(adj, labels, sens)
@@ -514,11 +530,13 @@ if __name__ == '__main__':
         idx_test, _ = torch.sort(idx_test)
 
         edge_index = torch.tensor(adj.nonzero(), dtype=torch.long)
-        num_class = labels.unique().shape[0] - 1
+        num_class = labels.unique().shape[0] - 1 #?
 
         # preprocess the input
         n = features.shape[0]
         data = Data(x=features, edge_index=edge_index)
+        # p data
+        # Data(x=[2000, 26], edge_index=[2, 10180])
         data.y = labels  # n
 
         # ============== generate counterfactual data (ground-truth) ================
@@ -526,10 +544,10 @@ if __name__ == '__main__':
             sens_rate_list = [0, 0.5, 1.0]
             path_truecf_data = 'graphFair_subgraph/cf/'
             dpp.generate_cf_true(data, args.dataset, sens_rate_list, sens_idx, path_truecf_data, save_file=True, raw_data_info=raw_data_info)  # generate
-            sys.exit()  # stop here
+            sys.exit()  # stop here. TODO 在cf模式下，运行到这里就会停下。
 
         num_node = data.x.size(0)
-        device = torch.device("cuda:0" if args.cuda and torch.cuda.is_available() else "cpu")
+        # device = torch.device("cuda:1" if args.cuda and torch.cuda.is_available() else "cpu")
 
         # Subgraph: Setting up the subgraph extractor
         ppr_path = './graphFair_subgraph/' + args.dataset
@@ -538,6 +556,7 @@ if __name__ == '__main__':
 
         # counterfactual graph generation (may not true)
         cf_subgraph_list = []
+        #MOD
         subgraph_load = True
         if subgraph_load:
             path_cf_ag = 'graphFair_subgraph/aug/' + f'{args.dataset}_cf_aug_' + str(0) + '.pkl'
@@ -558,6 +577,7 @@ if __name__ == '__main__':
         cf_subgraph_list.append(cf_subgraph)
 
         # add more augmentation if wanted
+        #MOD
         subgraph_load = True
         sens_rate_list = [0.0, 1.0]
         for si in range(len(sens_rate_list)):
